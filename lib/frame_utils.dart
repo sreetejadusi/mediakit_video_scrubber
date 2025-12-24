@@ -7,87 +7,110 @@ import 'package:flutter/services.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 
 class FrameUtils {
-  /// Generates a single thumbnail at the specified position.
+  /// Generates a single thumbnail.
   Future<Uint8List?> getThumbnail(
     String videoPath, {
     Duration position = Duration.zero,
-    int quality = 75,
+    int quality = 50, // Reduced default quality for speed
+    int maxHeight =
+        0, // 0 = original. Set this to match widget height for performance.
   }) async {
     try {
-      final uint8list = await VideoThumbnail.thumbnailData(
+      return await VideoThumbnail.thumbnailData(
         video: videoPath,
         imageFormat: ImageFormat.JPEG,
-        quality: quality, // Lower default quality slightly for performance
+        quality: quality,
+        maxHeight: maxHeight,
         timeMs: position.inMilliseconds,
       );
-      return uint8list;
-    } catch (e, s) {
+    } catch (e) {
       debugPrint('Error generating thumbnail: $e');
-      debugPrintStack(stackTrace: s);
       return null;
     }
   }
 
-  /// Generates a list of thumbnails using an isolate to avoid blocking the UI.
-  Future<List<Uint8List>> getListThumbnailIsolate({
+  /// Spawns an isolate to generate thumbnails and streams them back.
+  /// Returns a ReceivePort that emits [List<Uint8List>] (cumulative) or individual [Uint8List].
+  Stream<Uint8List> generateThumbnailsStream({
     required String videoPath,
     required Duration duration,
     required int split,
-  }) async {
+    int quality = 50,
+    int maxHeight = 0,
+  }) {
     final receivePort = ReceivePort();
     final rootToken = RootIsolateToken.instance;
-    
+
     if (rootToken == null) {
-      throw Exception('RootIsolateToken is null. Cannot spawn isolate.');
+      throw Exception('RootIsolateToken is null.');
     }
 
     final isolateData = {
       'videoPath': videoPath,
       'duration': duration,
       'split': split,
+      'quality': quality,
+      'maxHeight': maxHeight,
       'sendPort': receivePort.sendPort,
       'token': rootToken,
     };
 
-    await Isolate.spawn(_generateThumbnailsEntryPoint, isolateData);
+    Isolate.spawn(_generateThumbnailsEntryPoint, isolateData);
 
-    // Wait for the result from the isolate
-    final List<Uint8List> listThumbnail = await receivePort.first;
-    receivePort.close();
+    // Transform the receive port into a typed stream and handle cleanup
+    final controller = StreamController<Uint8List>();
 
-    return listThumbnail;
+    final sub = receivePort.listen((message) {
+      if (message is Uint8List) {
+        controller.add(message);
+      } else if (message == 'DONE') {
+        controller.close();
+        receivePort.close();
+      }
+    });
+
+    controller.onCancel = () {
+      sub.cancel();
+      receivePort.close();
+      // ideally we would kill the isolate here too, but for simple request/reply
+      // letting it finish or GC is usually acceptable for this scope.
+    };
+
+    return controller.stream;
   }
 
-  /// The entry point for the isolate.
-  static Future<void> _generateThumbnailsEntryPoint(Map<String, dynamic> data) async {
+  static Future<void> _generateThumbnailsEntryPoint(
+      Map<String, dynamic> data) async {
     final rootToken = data['token'] as RootIsolateToken;
     BackgroundIsolateBinaryMessenger.ensureInitialized(rootToken);
 
     final videoPath = data['videoPath'] as String;
     final duration = data['duration'] as Duration;
     final split = data['split'] as int;
+    final quality = data['quality'] as int;
+    final maxHeight = data['maxHeight'] as int;
     final sendPort = data['sendPort'] as SendPort;
 
-    // Calculate time points
     final jumpStep = (duration.inMilliseconds / split).ceil();
-    final List<Duration> timePoints = [];
-    for (int ms = 0; ms < duration.inMilliseconds; ms += jumpStep) {
-      timePoints.add(Duration(milliseconds: ms));
-    }
-
-    final List<Uint8List> thumbnails = [];
     final utils = FrameUtils();
 
-    for (var timePoint in timePoints) {
-      // Limit to split count to prevent overflow if duration/step is slightly off
-      if (thumbnails.length >= split) break; 
-      
-      final thumbnail = await utils.getThumbnail(videoPath, position: timePoint);
-      if (thumbnail != null) {
-        thumbnails.add(thumbnail);
+    for (int i = 0; i < split; i++) {
+      final currentMs = i * jumpStep;
+      // Ensure we don't go past end
+      if (currentMs > duration.inMilliseconds) break;
+
+      final bytes = await utils.getThumbnail(
+        videoPath,
+        position: Duration(milliseconds: currentMs),
+        quality: quality,
+        maxHeight: maxHeight,
+      );
+
+      if (bytes != null) {
+        sendPort.send(bytes);
       }
     }
 
-    sendPort.send(thumbnails);
+    sendPort.send('DONE');
   }
 }

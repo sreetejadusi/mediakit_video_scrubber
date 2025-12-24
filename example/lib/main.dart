@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 // Ensure this points to the file we created in the previous step
-import 'package:video_thumbnail_slider/video_thumbnail_slider.dart';
+import 'package:video_thumbnail_slider/mediakit_video_trimmer.dart';
 
 class SeltectThumbnailPage extends StatefulWidget {
   const SeltectThumbnailPage({required this.media, Key? key}) : super(key: key);
